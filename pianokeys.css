@@ -1,0 +1,24 @@
+/*** many styles are copied from Musical Playground and work great in vanilla JS! ***/
+
+.piano-keyboard {
+	overflow: auto; height: 32vh;       /* overridden in code */
+	min-height: 170px;    width: 100%;
+	white-space: nowrap;  background-color: #e0e0e0;
+}
+.piano-key {
+	touch-action: none; -ms-touch-action: none;
+	position: relative;  vertical-align: top;
+	border: solid black 1px;  border-bottom-left-radius: 4px;  border-bottom-right-radius: 4px;
+}
+.piano-key-white {
+	width: 1cm;  /* was: 6vw; */ height: 25vh;   /* overridden in code */
+	background-color: white; min-height: 140px; z-index: 5;
+}  
+.piano-key-black {
+	width: 0.66667cm;  /* was: 4vw; */	margin-left: -0.33333cm; /* was: -2vw; */
+	height: 12vh;   /* overridden in code */	background-color: black;
+	min-height: 70px;	z-index: 10;
+}
+.piano-key-shiftback {
+	margin-left: -0.33333cm; /* was: -2vw; */
+}
