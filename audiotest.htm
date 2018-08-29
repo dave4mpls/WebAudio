@@ -1,3 +1,4 @@
+<!DOCTYPE html>
 <HTML>
 <HEAD>
 <meta charset="UTF-8">
@@ -312,9 +313,9 @@ var synth; 		// tinysynth
 
 function loadMidi(files){
   var reader = new FileReader();
-  reader.onload=(e)=>{
+  reader.onload=function(e) {
     synth.loadMIDI(reader.result);
-  }
+  };
   reader.readAsArrayBuffer(files[0]);
 }
 function playMidi(){
@@ -333,21 +334,40 @@ function Init(){
     o.innerHTML=synth.getTimbreName(0,i);
     document.getElementById("prog").appendChild(o);
   }
+  synth.setSoundfontPath("./bsoundfonts");
+  synth.loadInstruments([0,11,128],function(errObj) {	// load piano, drums, vibes
+	  el("inststatus").innerText = errObj.errMsg;
+  	  }, function() { el("inststatus").innerText = "Loaded successfully"; console.log("Instruments loaded."); },
+	  function(i,n) { console.log("Loading Instrument " + i + " of " + n); });  // shows example of progress callback
+  synth.setQuality(2);
   setInterval(function(){
     var st=synth.getPlayStatus();
     document.getElementById("status").innerHTML="Play:"+st.play+"  Pos:"+st.curTick+"/"+st.maxTick;
   },100);
 }
 
+var midiAccess;
+
+function setupMidiInput(midiInputName) {
+	navigator.requestMIDIAccess({software: true}).then(function(m) {
+		var inputs = midiAccess.inputs;
+		inputs.forEach(function(port,key) {
+
+		});
+	});
+}
+
 function onLoadFunction() {
 	ctx = getPolyfillAudioContext();
-	//--- now add event listeners for controls of the drawbar organ
-	adjWave = new instrumentObject(ctx);
-	adjWave.connect(ctx.destination);   // connect my organ directly to the speakers :-) 
-	pianoKeyDisplay.createPianoKeyboard(el("keyboard"),0,127,25,21,108,adjWave.noteFunctionAdder);
-	insertDrawbars(el("drawbars"),adjWave);
-	insertEnvelope(el("envelope"),adjWave);
-	insertGeneralControls(el("generalcontrols"),adjWave);
+	if (ctx) {
+		//--- now add event listeners for controls of the drawbar organ
+		adjWave = new instrumentObject(ctx);
+		adjWave.connect(ctx.destination);   // connect my organ directly to the speakers :-) 
+		pianoKeyDisplay.createPianoKeyboard(el("keyboard"),0,127,25,21,108,adjWave.noteFunctionAdder);
+		insertDrawbars(el("drawbars"),adjWave);
+		insertEnvelope(el("envelope"),adjWave);
+		insertGeneralControls(el("generalcontrols"),adjWave);
+	}
 	//--- tinysynth keyboard setup
 	pianoKeyDisplay.createPianoKeyboard(el("tskeyboard"),0,127,25,21,108,function(x) {
 		x.keyDown = false;
@@ -364,6 +384,57 @@ function onLoadFunction() {
 		};
 	});
 	Init();  // init tiny synth
+	synth.setupMidiDevices(function() { refreshMidiUI(); }, function() { el("midiinputs").innerText = "No Midi Device Support"; } )
+}
+
+var numInputCheckboxes = 0, numOutputCheckboxes = 0;
+
+function readMidiUI() {
+	// reads the checkboxes in the input/output section to set up inputs and outputs
+	var inputList = [ ];
+	for (var i = 0; i < numInputCheckboxes; i++) {
+		if (el("midiinput_" + i).checked) inputList.push(el("midiinput_" + i).getAttribute("midiid"));
+	}
+	synth.setInput(inputList);
+	var outputList = [ ];
+	for (var i = 0; i < numOutputCheckboxes; i++) {
+		if (el("midioutput_" + i).checked) outputList.push(el("midioutput_" + i).getAttribute("midiid"));
+	}
+	synth.setOutput(outputList);
+}
+
+function refreshMidiUI() {
+	synth.refreshInputs(); synth.refreshOutputs();
+	var myInputs = synth.getInputs(); var myOutputs = synth.getOutputs();
+	el("midiinputs").innerHTML = ""; numInputCheckboxes = myInputs.length;
+	for (var i = 0; i < myInputs.length; i++) {
+		var newCheckbox = document.createElement("input"); newCheckbox.type="checkbox";
+		newCheckbox.checked = (synth.selectedInputs.indexOf(myInputs[i].id) !== -1);
+		newCheckbox.setAttribute("midiid",myInputs[i].id);
+		newCheckbox.id = "midiinput_" + i;
+		newCheckbox.addEventListener("click",readMidiUI);
+		var newLabel = document.createElement("span");
+		newLabel.innerText = myInputs[i].name;
+		var newBr = document.createElement("br");
+		el("midiinputs").appendChild(newCheckbox); el("midiinputs").appendChild(newLabel); el("midiinputs").appendChild(newBr);
+	}
+	var myOutputs = synth.getOutputs(); var myOutputs = synth.getOutputs();
+	el("midioutputs").innerHTML = ""; numOutputCheckboxes = myOutputs.length;
+	for (var i = 0; i < myOutputs.length; i++) {
+		var newCheckbox = document.createElement("input"); newCheckbox.type="checkbox";
+		newCheckbox.checked = (synth.selectedOutputs.indexOf(myOutputs[i].id) !== -1);
+		newCheckbox.setAttribute("midiid",myOutputs[i].id);
+		newCheckbox.id = "midioutput_" + i;
+		newCheckbox.addEventListener("click",readMidiUI);
+		var newLabel = document.createElement("span");
+		newLabel.innerText = myOutputs[i].name;
+		var newBr = document.createElement("br");
+		el("midioutputs").appendChild(newCheckbox); el("midioutputs").appendChild(newLabel); el("midioutputs").appendChild(newBr);
+	}
+}
+
+function showDrawbar() {
+	el('drawbarstuff').style.display = '';	
 }
 
 </SCRIPT>
@@ -371,6 +442,8 @@ function onLoadFunction() {
 <BODY ONLOAD="onLoadFunction()">
 <h3>Audio Test</h3>
 This is a test of various audio things.<br>
+<button onclick="showDrawbar()">Show Drawbar Organ</button>
+<div style="display:none" id=drawbarstuff>
 <div style="width: 80vw; border: thick solid black;" id=keyboard></div>
 <table><tr><td class="control-cell">
 Drawbars:<br>
@@ -378,8 +451,10 @@ Drawbars:<br>
 </td><td class="control-cell">Envelope:
 <div id=envelope class="control-container"></div>
 </td><td class="control-cell">General Controls:<div id=generalcontrols class="control-container"></div></td></tr></table>
+</div>
 <hr>
-Now the tiny synth, which I am expanding:
+Now the tiny synth, which I am expanding:<br>
+Instrument Loaded Status: <span id="inststatus">Not Loaded</span><br>
 <div style="width: 80vw; border: thick solid black;" id=tskeyboard></div>
 <hr/>
 Load MIDI file from local : <input type="file" onchange="loadMidi(this.files)"/><br/>
@@ -394,9 +469,16 @@ ReverbLev<br/>
 <input type="range" value="50" min="0" max="100" oninput="synth.setReverbLev(this.value/100)"/><br/>
 
 <br/><br/>
-Quality : <select onchange="synth.setQuality(this.selectedIndex)"><option>Quality=0</option><option selected>Quality=1</option></select>
+Quality : <select onchange="synth.setQuality(this.selectedIndex)"><option>Quality=0</option><option>Quality=1</option><option selected>Quality=2</option></select>
 <br/>
 Timbre : <select id="prog" onchange="SetProgram(this.selectedIndex)"></select>
-
+<table><tr>
+	<td class="control-cell">Inputs:
+		<div id=midiinputs></div>
+	</td>
+	<td class="control-cell">Outputs:
+		<div id=midioutputs></div>
+	</td>
+</tr></table>
 </BODY>
 </HTML>

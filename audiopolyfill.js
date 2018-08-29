@@ -2,8 +2,8 @@
 
 function getPolyfillAudioContext() {
 	window.AudioContext = window.AudioContext || window.webkitAudioContext;
-	var ctx = new AudioContext();
-	if (ctx)   {
+	if (window.AudioContext)   {
+		var ctx = new window.AudioContext();
 		//-- fill in certain things we like
 		if (!ctx.createConstantSource) {		//-- like an AudioNode that with an offset AudioParam that can automate a parameter input to any audio node
 			ctx.createConstantSource = function() {		//-- the polyfilled constant source is fully operational!
