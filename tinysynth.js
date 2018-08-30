@@ -22,12 +22,12 @@
 //  or -1 to leave the channel number alone.  After you set that up, any time that patch is selected
 //  for a channel, the commands will go through the custom instrument or MIDI output port desired.
 //
-function instrumentObject(inputCtx, harmonicsOverride, envelopeOverride, baseVelocityOverride) {
+function drawbarOrgan(inputCtx, harmonicsOverride, envelopeOverride, baseVelocityOverride) {
 	//--- A simple and complete Instrument Object with additive harmonics (a.k.a. tonewheels), master volume switch, controllable note buffer using
 	//--- the audio clock, envelope adjustments, and whatever else I need.  Pass the audio context when creating.
 	//--- The override parameters are optional and can make instruments with different sounds.
 	var instrument = this;
-		var ctx = inputCtx;
+	var ctx = inputCtx;
 	var max = function (a,b) { return (a>b) ? a : b; };  var min = function (a,b) { return (a<b) ? a : b; };
 	var limitval = function(a,b,c) { if (a < b) a = b; if (a > c) a = c; return a; };
 	var logAdjust = function(a) { return a*a*a; }   // adjust gain controls (between 0-1) by raising them to the 4th power since hearing is logarithmic (https://www.dr-lex.be/info-stuff/volumecontrols.html)
@@ -57,7 +57,10 @@ function instrumentObject(inputCtx, harmonicsOverride, envelopeOverride, baseVel
 
 	//-- this section implements the main volume control -- you supply a linear ratio 0-1, it applies the exponential or power function to make it sound right.
 	var mainGain = ctx.createGain();	// main volume control, all oscillators are connected to it
-	setupSlider("MainVolume", 1.0, function(v) { return logAdjust(v); }, mainGain.gain);
+  setupSlider("MainVolume", 1.0, function(v) { return logAdjust(v); }, mainGain.gain);
+  
+  //-- the sustain pedal is mostly a flag on individual notes, but there's a main flag too.
+  var sustainPedal = false;
 	
 	//-- here is the main connection for notes to attach to.  If no dynamics compressor gets added, it's also the final connection to outside.
 	var noteAttachPoint = mainGain;   // we set this to wherever the notes are supposed to connect to
@@ -73,8 +76,8 @@ function instrumentObject(inputCtx, harmonicsOverride, envelopeOverride, baseVel
 		compressor.ratio.setValueAtTime(12, ctx.currentTime);
 		compressor.attack.setValueAtTime(0.25, ctx.currentTime);
 		compressor.release.setValueAtTime(0.25, ctx.currentTime)		
-	}	
-	
+  }	
+  
 	//-- this section implements the drawbars, as constant-source nodes.  You can change their "offset" AudioParam using any of the
 	//-- ramping or setting functions.
 	var drawbarGains = [ ];		// note below: drawbars are volume controls, hence, should use power formula since hearing is logarithmic!
@@ -92,7 +95,9 @@ function instrumentObject(inputCtx, harmonicsOverride, envelopeOverride, baseVel
 		drawbarGains[dbindx].offset.setTargetAtTime(limitval(dbval,0,drawbarMax)/drawbarMax,startTime, controlResponse/5);
 	}
 	this.setDrawbarWaveform = function(dbindx, waveform, startTime) {
-		
+		setTimeout(function() {
+      harmonics[dbindx][2] = waveform;
+    }, startTime - ctx.currentTime);
 	}
 	
 	//-- the instrument has an array of frequency modulators that connect to notes using the function connectFrequencyModulators.
@@ -172,7 +177,7 @@ function instrumentObject(inputCtx, harmonicsOverride, envelopeOverride, baseVel
 		//-- object properties
 		var note = this; startTime = startTime || ctx.currentTime;	// default start time for note on is now
 		note.noteNumber = noteNumber; note.velocity = noteVelocity; note.startTime = startTime; // save parameters for later
-		note.noteOn = true; note.noteSuppressed = false;
+		note.noteOn = true; note.noteSuppressed = false; note.noteSustained = false;
 		var srcNodes = [ ]; var eGainNodes = [ ];    // we keep track of src's, drawbar gain, and envelope gain nodes
 		//--- object methods including stopping the note
 		this.stop = function(startTime) { 
@@ -209,11 +214,14 @@ function instrumentObject(inputCtx, harmonicsOverride, envelopeOverride, baseVel
   // The synth doesn't call these routines directly, it just calls send, but they are good to
   // have to implement MIDI messages.  The drawbar organ instrument has no channels, it only makes one sound timbre at a time.
   this.noteOn = function(channel, noteNumber, velocity, startTime) {
-    instrument.noteModules.push(new noteModule(noteNumber, velocity, startTime));
+    noteModules.push(new noteModule(noteNumber, velocity, startTime));
   };
   this.noteOff = function(channel, noteNumber, startTime) {
     for (var i = 0; i < noteModules.length; i++) {	// set all the notes in the instrument that are that note number to "stopping".
-      if (noteModules[i].noteNumber === noteNumber) noteModules[i].stop(startTime);
+      if (noteModules[i].noteNumber === noteNumber) {
+        if (sustainPedal) noteModules[i].noteSustained = true;
+        else noteModules[i].stop(startTime);
+      }
     }
   };
   this.allSoundOff = function(channel) {
@@ -223,19 +231,36 @@ function instrumentObject(inputCtx, harmonicsOverride, envelopeOverride, baseVel
   };
   this.setMidiBend = function(channel, bend, startTime) {
     this.setPitchBend(bend/16384,startTime);
-  }
-	
+  };
+  this.setModulation = function(channel,v,startTime) {
+    this.setTremoloGain((v&0x7F)/127,startTime);
+  };
+  this.setSustain = function(ch,v,t){    // note: I think sustain will work on IE (with no changes?!)
+    var ssFunc = function() {
+      sustainPedal=(v<64?false:true);
+      if(v<64){
+        for(var i=noteModules.length-1;i>=0;--i){
+          if (noteModules[i].noteSustained) noteModules[i].stop(t);
+        }
+      }
+    };
+    if (t - ctx.currentTime < 0.010) ssFunc();
+    else setTimeout(ssFunc, t - ctx.currentTime);
+  };
+
   //--- this section implements a public MIDI interface required of all custom instruments
   //--- returns true if it handles it, false if it doesn't, as expected for a custom instrument module
-	this.send = function(msg) {
+	this.send = function(msg,t) {
     var ch=msg[0]&0xf;
     var cmd=msg[0]&~0xf;
     if(cmd<0x80||cmd>=0x100)
       return false;
-    if(this.ctx.state=="suspended"){this.ctx.resume();}
+    if(ctx.state=="suspended"){ctx.resume();}
     switch(cmd){
     case 0xb0:  /* ctl change: we return false if it should be handled upstream by the default handler for the tinysynth */
       switch(msg[1]){
+      case 1:  this.setModulation(ch,msg[2],t); break;
+      case 64: this.setSustain(ch,msg[2],t); break;
       case 120:  /* all sound off */
       case 123:  /* all notes off */
       case 124: case 125: case 126: case 127: /* omni off/on mono/poly */
@@ -706,7 +731,7 @@ function WebAudioTinySynth(opt){
       this.selectedInputs = [ "internal" ]; this.selectedOutputs = ["internal"];
       this.availableQualities = [true,true,false];   // array of 0-2 indicating which qualities are available.  You have to load at least one instrument successfully, then Quality 2 turns on.  Quality 0/1 turn off for Internet Explorer since it can ONLY do samples.
       this.maxTick=0, this.playTick=0, this.playing=0; this.releaseRatio=3.5;
-      this.programOverrides = { };   // here we store custom overrides and redirects for particular instruments.  they can redirect to external devices OR custom instrument modules like the drawbar organ one above
+      this.programOverride = { };   // here we store custom overrides and redirects for particular instruments.  they can redirect to external devices OR custom instrument modules like the drawbar organ one above
       for(var i=0;i<16;++i){
         this.pg[i]=0; this.vol[i]=3*100*100/(127*127);
         this.bend[i]=0; this.brange[i]=0x100;
@@ -1386,12 +1411,34 @@ function WebAudioTinySynth(opt){
     setBendRange:function(ch,v){
       this.brange[ch]=v;
     },
+    _disconnectCustomInstruments:function(ch,v) {    // disconnects any custom instruments attached to ch that are associated with patch v.
+      try {
+        if (this.programOverride[v]) {
+          for (var i = 0; i < this.programOverride[v].length; i++) {
+            var o = this.programOverride[v][i][0];
+            if ((typeof o) !== 'string') {
+              try { o.disconnect(this.chvol[ch]); } catch(e) { }
+            }
+          }
+        }
+      } catch(e) { }
+    },
     setProgram:function(ch,v){
       if(this.debug)
         console.log("Pg("+ch+")="+v);
+      this._disconnectCustomInstruments(this.pg[ch]);  // disconnect from any custom instruments that may have been attached before
       this.pg[ch]=v;    // Added by DW below: in quality level 2, load the instrument if it exists.
       if (this.quality === 2) { this.loadInstrument(v,null,null); }   // aysnchronous call
       // during music playback, we can't stop-- notes that play before it's loaded will just fall back to quality 1.  For best playback, do like the MIDI file player does and load all your instruments first.
+      if (this.programOverride[v]) {  // this instrument has an override.  see if there are any custom instruments
+        //-- if there are you have to connect them to the channel volume output, so pan and vol can be controlled.
+        for (var i = 0; i < this.programOverride[v].length; i++) {
+          var o = this.programOverride[v][i][0];
+          if ((typeof o) !== 'string') {
+            if (this.chvol && this.chvol[ch]) o.connect(this.chvol[ch]);
+          }
+        }
+      }
     },
     setBend:function(ch,v,t){
       if (this.useAudioTags()) return;
@@ -1452,16 +1499,16 @@ function WebAudioTinySynth(opt){
     send:function(msg,t){   /* DW new: Public version of send that sends the midi message to whichever input sources are currently configured! */
       var midi = this;
       // first check for program overrides on the current channel.
-      if (msg.length < 3) return false;
-      var ch = msg[0] & 0x0F; var pgm = pg[ch];
+      if (msg.length < 1) return false;
+      var ch = msg[0] & 0x0F; var pgm = this.pg[ch];
       if (this.programOverride[pgm]) {
         var o = this.programOverride[pgm];
         for (var i = 0; i < o.length; i++) {  // multiple overrides are allowed!
           var dch = o[i][1];
-          if (dch > 0) { msg[0] = (msg[0] & 0xF0) & (dch & 0x0F); }  // check for channel redirect
+          if (dch >= 0) { msg[0] = (msg[0] & 0xF0) & (dch & 0x0F); }  // check for channel redirect
           if ((typeof o[i][0])==='string') 
             this.sendExternal(o[i][0],msg,t);   // override can be a string to go to a particular external output
-           else {
+          else {
              var rval = o[i][0].send(msg, t);  // try to have custom instrument handle it
              if (!rval) this._send(msg,t);  // if it won't, have the standard INTERNAL routines handle it.
            } 
@@ -1470,7 +1517,7 @@ function WebAudioTinySynth(opt){
       else
         this._sendCurrentOutput(msg,t);
     },
-    _sendCurrentOutput(msg, t) {
+    _sendCurrentOutput:function(msg, t) {
       // send that does the standard thing (cycling through the currently selected general outputs)
       // that we call if any particular custom send device doesn't handle a particular message
       var midi = this;
@@ -1480,10 +1527,10 @@ function WebAudioTinySynth(opt){
         if (!this.output[i])    // special case: internal output.  Send using Audio Clock (regardless of t parameter)
           this._send(msg,t);
         else 
-          this.sendExternal(output[i],msg,t);  
+          this.sendExternal(this.output[i],msg,t);  
       }
     },
-    sendExternal(device,msg,t) {  // Sends a MIDI message to a particular external port, which can be either a MIDI output object, OR, an ID string to locate the object.
+    sendExternal:function(device,msg,t) {  // Sends a MIDI message to a particular external port, which can be either a MIDI output object, OR, an ID string to locate the object.
       if ((typeof device) === 'string') {
         if (this.outputHash.hasOwnProperty(device)) device = this.outputHash[device];
         else return false;
@@ -1494,8 +1541,8 @@ function WebAudioTinySynth(opt){
         device.send(msg);
     },
     _sendExternalOnDelay:function(msg,device,t) {
-      var midi = this;
-      setTimeout(function() { device.send(msg); }, (t-this.actx.currentTime)*1000);
+      var midi = this;  // the try/catch below is because MIDI files might have sysex messages, which we aren't allowed to send
+      setTimeout(function() { try { device.send(msg); } catch(e) { } }, (t-this.actx.currentTime)*1000);
     },
     _send:function(msg,t){    /* send midi message (DW new: INTERNAL version of send.  Public version now incorporates MIDI input/output multiplexing! */
       var ch=msg[0]&0xf;
@@ -1593,8 +1640,8 @@ function WebAudioTinySynth(opt){
       if(!dest)
         this.dest=actx.destination;
       //--- some browsers like Edge don't have createConstantSource, but it is handy!  and especially for making my drawbar organ option.
-      if (!ctx.createConstantSource) {		//-- like an AudioNode that with an offset AudioParam that can automate a parameter input to any audio node
-        ctx.createConstantSource = function() {		//-- the polyfilled constant source is fully operational!
+      if (!this.actx.createConstantSource) {		//-- like an AudioNode that with an offset AudioParam that can automate a parameter input to any audio node
+        this.actx.createConstantSource = function() {		//-- the polyfilled constant source is fully operational!
           var retObj = { };
           retObj.gainNode = ctx.createGain();
           retObj.offset = retObj.gainNode.gain;	// our "offset" audioParam is really the gain param of the inner gain node.
@@ -1609,22 +1656,6 @@ function WebAudioTinySynth(opt){
           return retObj;
         };
       }
-		if (!ctx.createConstantSource) {		//-- like an AudioNode that with an offset AudioParam that can automate a parameter input to any audio node
-			ctx.createConstantSource = function() {		//-- the polyfilled constant source is fully operational!
-				var retObj = { };
-				retObj.gainNode = ctx.createGain();
-				retObj.offset = retObj.gainNode.gain;	// our "offset" audioParam is really the gain param of the inner gain node.
-				retObj.buffer = ctx.createBuffer(1,1,44100);  // a buffer with one sample
-				var bufferArray = retObj.buffer.getChannelData(0); bufferArray[0] = 1.0;    // whose value is 1, which is multiplied by the gain to pass on to other things.
-				retObj.bufferSource = ctx.createBufferSource();
-				retObj.bufferSource.buffer = retObj.buffer; retObj.bufferSource.connect(retObj.gainNode);
-				retObj.bufferSource.loop = true;
-				retObj.connect = function(n) { retObj.gainNode.connect(n); }  // to connect the constant source, connect its inner gain node.
-				retObj.start = function(when,offset,duration) { return retObj.bufferSource.start(when,offset,duration); }
-				retObj.stop = function(when) { return retObj.bufferSource.stop(when); }
-				return retObj;
-			};
-		}
       this.tsdiff=performance.now()*.001-this.actx.currentTime;
       //console.log("TSDiff:"+this.tsdiff);
       this.out=this.actx.createGain();
