@@ -226,7 +226,7 @@ function drawbarOrgan(inputCtx, harmonicsOverride, envelopeOverride, baseVelocit
   };
   this.allSoundOff = function(channel) {
     for (var i = 0; i < noteModules.length; i++) {	// set all the notes in the instrument to "stopping".
-      noteModules[i].stop(startTime);
+      noteModules[i].stop(0);
     }
   };
   this.setMidiBend = function(channel, bend, startTime) {
@@ -725,9 +725,19 @@ function WebAudioTinySynth(opt){
       this.pg=[]; this.vol=[]; this.ex=[]; this.bend=[]; this.rpnidx=[]; this.brange=[];
       this.sustain=[]; this.notetab=[]; this.rhythm=[];
       this.soundfontPath = ""; this.soundfontBinaries = { }; this.soundfontBuffers = { };
+      this.soundfontFilePrefix = "";   // determined on first instrument load: SF for MP3 soundfonts or SFOGG for OGG ones.  OGG ones are better, and in fact, MP3 ones only exist for Safari's benefit.
       this.inputList = []; this.outputList = [ ]; this.MIDIAccess = null; this.MIDIEnabled = false;
       this.inputHash = { }; this.outputHash = { }; this.onmidimessage = null;
       this.input = [null]; this.output = [null]; this.passThruMIDI = true;  // default: on all inputs we have attached, we pass through MIDI signals to the current output.
+      //--- DW new feature: Auto-Gain.  Some instrument samples are really quiet, and some phones are quiet, and some places are noisy.
+      //--- With Auto-Gain, you can multiply the samples out to a louder set-point to hear them better.
+      //--- All auto-gain parameters are public (autoGainMaxes is automatically calculated though), and you can alter them as you wish.
+      //--- I set Auto-Gain to on for all instruments, and didn't fill in an instrument list for level 1, because I found out the artifacts I heard were from MP3 samples, not AutoGain.  Now I have OGG samples again and it works great!  I guess audio compression quality DOES matter!
+      this.autoGainLevel = 2;   // Levels are: 0, no auto-gain; 1, only on instruments I selected as needing it most; 2, on all instruments.
+      this.autoGainSetTo = 0.7;  // what we set the amplitude to in autoGain
+      this.autoGainIgnoreAbove = 0.5;   // we leave samples alone if their maximum is above this (during AutoGain)
+      this.autoGainInstruments = [ ];
+      this.autoGainMaxes = { };  // maximums for all samples so we can turn auto gain or off at any time
       this.selectedInputs = [ "internal" ]; this.selectedOutputs = ["internal"];
       this.availableQualities = [true,true,false];   // array of 0-2 indicating which qualities are available.  You have to load at least one instrument successfully, then Quality 2 turns on.  Quality 0/1 turn off for Internet Explorer since it can ONLY do samples.
       this.maxTick=0, this.playTick=0, this.playing=0; this.releaseRatio=3.5;
@@ -834,6 +844,20 @@ function WebAudioTinySynth(opt){
       }
       return window.btoa( binary );
     },
+    getSampleMax:function(sample) {
+      //-- Used for auto-gain: Gets the maximum amplitude of a sample buffer.
+      var nch = sample.numberOfChannels;  // do it in stereo!
+      var maxAbsValue = 0; var dabs = 0; var chlen = 0 | 0; var chdata = null; var i = 0 | 0; var ch = 0 | 0;
+      for (ch = 0; ch < nch; ch++) {
+        chdata = sample.getChannelData(ch);  // now we have the data!
+        chlen = chdata.length | 0;  // i'm adding the |0's like in asm.js, to cast the loop index to integer, to make it faster??!!
+        for (i = 0|0; i < chlen; i++) {
+          dabs = Math.abs(chdata[i]);
+          if (dabs > maxAbsValue) maxAbsValue = dabs;
+        }
+      }
+      return maxAbsValue;
+    },
     expandInstrument:function(instNum, callbackErr, callbackSuccess) {  // new from DW: (asynchronously) expand a binary soundfont file's notes into its corresponding AudioBuffers for playback.
       var buf = this.soundfontBinaries[instNum];  // to get this you have to loadInstrument, which automatically calls expandInstrument.
       var dv = new DataView(buf);   // DataView so we can force little-enian reading of file, just like how I created it
@@ -861,8 +885,11 @@ function WebAudioTinySynth(opt){
         bindx += 12 + (lengthWords<<2);
         if (synth.actx.decodeAudioData) {
           synth.actx.decodeAudioData(noteBuffer.buffer, function(finishedBuffer) {
+            var maxAmp = synth.getSampleMax(finishedBuffer);
             if (!synth.soundfontBuffers.hasOwnProperty(instNum)) synth.soundfontBuffers[instNum] = { };
+            if (!synth.autoGainMaxes.hasOwnProperty(instNum)) synth.autoGainMaxes[instNum] = { };
             synth.soundfontBuffers[instNum][noteNum] = finishedBuffer;
+            synth.autoGainMaxes[instNum][noteNum] = maxAmp;
             asyncRecurseExpand(bindx,synth,callbackErr,callbackSuccess,bv,dv,instNum);
           }, function() { if (callbackErr) callbackErr("Soundfont file for note " + noteNum + " could not be decoded"); });
         } else {    // IE: no decode audio data.  But that's okay because the audio DOM node needs MP3 anyway!
@@ -875,11 +902,28 @@ function WebAudioTinySynth(opt){
             asyncRecurseExpand(bindx,synth,callbackErr,callbackSuccess,bv,dv,instNum); }, 5);
         }
       };
-      asyncRecurseExpand(bindx, synth, callbackErr, callbackSuccess, bv, dv, instNum);
+      asyncRecurseExpand(bindx, mysynth, callbackErr, callbackSuccess, bv, dv, instNum);
     },
     loadInstrument:function(instNum, callbackErr, callbackSuccess) {	// new from DW: load instrument; asynchronous; callbacks on complete
       if (this.soundfontBuffers.hasOwnProperty(instNum)) { if (callbackSuccess) callbackSuccess(); return; }  // success: it's already loaded!
-      var filename = this.soundfontPath + "/SF_" + (instNum+1) + ".BIN";   // we will get this file via XHR
+      //-- if needed, determine the file prefix
+      if (this.soundfontFilePrefix==="") {
+        var mp3Prefix = "SF"; var oggPrefix = "SFOGG";
+        if (typeof(window.Audio)==="undefined") this.soundfontFilePrefix = mp3Prefix;
+        else {
+          var audio = new window.Audio();
+          if (typeof(audio.canPlayType)==='undefined') this.soundfontFilePrefix = mp3Prefix;
+          else {
+            var vorbis = audio.canPlayType('audio/ogg; codecs="vorbis"');
+            vorbis = (vorbis === 'probably' || vorbis === 'maybe');
+            if (window.navigator.userAgent.indexOf('Edge/') >= 0) vorbis = false;  // Edge thinks it can read Ogg, and it does, but REALLY SLOWLY. 
+            if (vorbis) this.soundfontFilePrefix = oggPrefix;
+            else this.soundfontFilePrefix = mp3Prefix;
+          }
+        }
+      }
+      //-- now get the file
+      var filename = this.soundfontPath + "/" + this.soundfontFilePrefix + "_" + (instNum+1) + ".BIN";   // we will get this file via XHR
       var xhr=new XMLHttpRequest(); var errParm = { "xhr" : xhr, "errMsg" : "Soundfont not found or network error" };  // default error return
       xhr.open("GET",filename,true);   //-- Note that if the soundfont is not found, the player's default is to use its lovely FM-synthesized Quality 1 sounds.
       xhr.responseType="arraybuffer"; var that = this;
@@ -1000,13 +1044,13 @@ function WebAudioTinySynth(opt){
     stopMIDI:function(){
       this.playing=0;
       for(var i=0;i<16;++i)
-        this.send([0xb0+(i&0x0F),124,0],0 )  // MIDI message to all outputs: all sound off.
+        this.allSoundOffAllDevices(i);
     },  /* actx.currentTime+this.preroll+0.1 */
     playMIDI:function() {     // new from DW: external wrapper version of playMIDI that auto-loads instruments before starting to play.
       if (!this.song) return;
       if (this.quality < 2) return this._playMIDI();    // non-sampled sounds work the same as before
       var neededInstruments = this.instrumentsInSong(); var that = this;
-      if (neededInstruments.length===0) return this._playMIDI();  // if no instruments needed, start the usual way
+      if (neededInstruments.length===0 || (!this.hasInternalOutput())) return this._playMIDI();  // if no instruments needed, start the usual way
       this.loadInstruments(neededInstruments, function() {
         that.setQuality(1);
         that._playMIDI();  // on error loading instruments, revert to quality level 1.
@@ -1210,6 +1254,20 @@ function WebAudioTinySynth(opt){
       }
     },
     useAudioTags:function() { if (!this.actx.createOscillator) return true; else return false; },
+    getNextPositiveZeroCrossing:function(sample,t) {   // looks at the sample data, finds the next time after t (in seconds) where there is a zero crossing going up.
+      //-- purpose: loop samples without clicks?!
+      var dt = sample.getChannelData(0);  var dt2 = null;
+      if (sample.numberOfChannels == 2) dt2 = sample.getChannelData(1); else dt2 = dt;
+      var ti = (t * sample.sampleRate)|0; var dtlen = dt.length|0;  // get index into array
+      var endi = dtlen - 1;
+      if ((t+0.25)*sample.sampleRate < endi) endi = ((t+0.25)*sample.sampleRate)|0;  // only search a quarter of a second -- don't get too far off the original time
+      for (var i = ti; i < endi; i++) {
+        if (dt[i]+dt2[i] < 0 && dt[i+1]+dt2[i+1] >= 0) {    // i+1 is the one!
+          return (i+1)/sample.sampleRate;
+        }
+      }
+      return t;   // if for some reason we can't find one, just return the original timestamp.
+    },
     _note:function(t,ch,n,v,p){   
       // Modified by DW to use Audio tags on archaic browsers like IE.
       if (this.useAudioTags()) {    // IE version-- we made a fake audio context with a timer, but it has no oscillator
@@ -1238,8 +1296,8 @@ function WebAudioTinySynth(opt){
       this._limitVoices(ch,n);
       // quality 2: get sample if available, fall back to lower quality if not (DW)
       var activeQuality = this.quality; var sample = null;
+      var thisInst = this.pg[ch]; if (ch===9) thisInst = 128;  // drum channel sample is always instrument #128
       if (activeQuality===2) {
-        var thisInst = this.pg[ch]; if (ch===9) thisInst = 128;  // drum channel sample is always instrument #128
         if (this.soundfontBuffers.hasOwnProperty(thisInst) &&
           this.soundfontBuffers[thisInst].hasOwnProperty(n)) {
             sample = this.soundfontBuffers[thisInst][n];
@@ -1254,8 +1312,24 @@ function WebAudioTinySynth(opt){
           // sampling version
           pn=p[0];
           out = this.chvol[ch], sc=v*v/16384, fp[i]=f;
-          o[i]=this.actx.createBufferSource(); o[i].buffer = sample;
-          if (!this.rhythm[ch] && pn.s>0.6) o[i].loop = true;     // loop the sample if this is a sustained sound (and not percussion-- let's assume no percussion is sustained!)-- works pretty good!
+          if (this.autoGainLevel > 0) {    // We multiply the gain if auto-gain is on.
+            if (this.autoGainLevel >=2 || this.autoGainInstruments.indexOf(thisInst) >= 0) {
+              var sampMax = this.autoGainMaxes[thisInst][n];
+              if (sampMax <= this.autoGainIgnoreAbove) {
+                var thisMax = sampMax; var factor = 1;  // we compute a factor that is a power of 2 to multiply by, for cleaner adjustment.
+                while (thisMax*factor*2 < this.autoGainSetTo) { factor *= 2; thisMax *= 2; }
+                sc *= factor;
+              }
+            }
+          }
+          o[i]=this.actx.createBufferSource(); o[i].buffer = sample; var endRampDown = false;
+          if (!this.rhythm[ch] && p[0].s>=0.39) { 
+            o[i].loop = true; 
+            o[i].loopStart = this.getNextPositiveZeroCrossing(sample,0.8); 
+            o[i].loopEnd = this.getNextPositiveZeroCrossing(sample, sample.duration - 0.1); 
+          }     // loop the sample if this is a sustained sound (and not percussion-- let's assume no percussion is sustained!)-- works pretty good!
+          else 
+            endRampDown = true;  // also, we always ramp down at the end of the sample
           this.chmod[ch].connect(o[i].detune);  // mod wheel
           if (o[i].detune) o[i].detune.value=this.bend[ch];    // pitch bend
           g[i]=this.actx.createGain();
@@ -1263,6 +1337,10 @@ function WebAudioTinySynth(opt){
           o[i].connect(g[i]); g[i].connect(out);
           vp[i]=sc;
           g[i].gain.setValueAtTime(vp[i],t);  // no attack time
+          if (endRampDown) {  // if determined to be needed above, we have a soft decay right before the sample runs out to avoid clicks
+            g[i].gain.setValueAtTime(vp[i],t+sample.duration-0.10);
+            g[i].gain.linearRampToValueAtTime(0,t+sample.duration-0.01);
+          }
           o[i].start(t);    // end of sample version by DW
         } else {    // regular synthesis version
           pn=p[i];
@@ -1394,12 +1472,19 @@ function WebAudioTinySynth(opt){
     allSoundOff:function(ch){
       for(var i=this.notetab.length-1;i>=0;--i){
         var nt=this.notetab[i];
-        if(nt.ch==ch){
+        if(nt.ch===ch){
           this._pruneNote(nt);
           this.notetab.splice(i,1);
         }
       }
     },
+    allSoundOffAllDevices:function(ch) {  // unlike all sound off, this also sends messages to all current output devices.
+      this.send([0xb0+(ch & 0x0F),120,0])  // MIDI message to all outputs: all sound off.
+    },
+    allSoundOffAllDevicesAllChannels:function() {
+      for (var i = 0; i < 16; i++) this.allSoundOffAllDevices(i);
+    },
+    MIDIPanic:function() { allSoundOffAllDevicesAllChannels(); },   // shorter name, same concept
     resetAllControllers:function(ch){
       this.bend[ch]=0; this.ex[ch]=1.0;
       this.rpnidx[ch]=0x3fff; this.sustain[ch]=0;
@@ -1423,12 +1508,19 @@ function WebAudioTinySynth(opt){
         }
       } catch(e) { }
     },
+    hasInternalOutput:function() {  // needed for setProgram: finds out if we currently are sending internal output.  We only auto-load instruments in that case.
+        for (var i = 0; i < this.selectedOutputs.length; i++) {
+            if (this.selectedOutputs[i]==="internal") return true;
+        }
+        return false;
+    },
     setProgram:function(ch,v){
       if(this.debug)
         console.log("Pg("+ch+")="+v);
+      if (ch===9) return;   // we can't change the program on drums
       this._disconnectCustomInstruments(this.pg[ch]);  // disconnect from any custom instruments that may have been attached before
       this.pg[ch]=v;    // Added by DW below: in quality level 2, load the instrument if it exists.
-      if (this.quality === 2) { this.loadInstrument(v,null,null); }   // aysnchronous call
+      if (this.quality === 2  && this.hasInternalOutput()) { this.loadInstrument(v,null,null); }   // aysnchronous call
       // during music playback, we can't stop-- notes that play before it's loaded will just fall back to quality 1.  For best playback, do like the MIDI file player does and load all your instruments first.
       if (this.programOverride[v]) {  // this instrument has an override.  see if there are any custom instruments
         //-- if there are you have to connect them to the channel volume output, so pan and vol can be controlled.
@@ -1456,7 +1548,7 @@ function WebAudioTinySynth(opt){
       }
     },
     noteOn:function(ch,n,v,t){
-      if(v==0){
+        if(v==0){
         this.noteOff(ch,n,t);
         return;
       }
@@ -1481,6 +1573,7 @@ function WebAudioTinySynth(opt){
         }
       }
     },
+    currentTime:function() { if (!this.actx) return 0; else return this.actx.currentTime; },
     _tsConv:function(t){
       if(t==undefined||t<=0){
         t=0;
@@ -1641,8 +1734,9 @@ function WebAudioTinySynth(opt){
         this.dest=actx.destination;
       //--- some browsers like Edge don't have createConstantSource, but it is handy!  and especially for making my drawbar organ option.
       if (!this.actx.createConstantSource) {		//-- like an AudioNode that with an offset AudioParam that can automate a parameter input to any audio node
+        var parentSynth = this;
         this.actx.createConstantSource = function() {		//-- the polyfilled constant source is fully operational!
-          var retObj = { };
+          var retObj = { }; var ctx = parentSynth.actx;
           retObj.gainNode = ctx.createGain();
           retObj.offset = retObj.gainNode.gain;	// our "offset" audioParam is really the gain param of the inner gain node.
           retObj.buffer = ctx.createBuffer(1,1,44100);  // a buffer with one sample
@@ -1696,6 +1790,9 @@ function WebAudioTinySynth(opt){
       this.setMasterVol();
       this.out.connect(this.comp);
       this.comp.connect(this.dest);
+      // debugging
+      // this.out.disconnect(); this.out.connect(this.dest);  // to debug you can skip all the postprocessing and see what it sounds like
+      // end debugging
       this.chvol=[]; this.chmod=[]; this.chpan=[];
       this.wave={"w9999":this._createWave("w9999")};
       this.lfo=this.actx.createOscillator();
@@ -1719,8 +1816,9 @@ function WebAudioTinySynth(opt){
       }
       this.setReverbLev();
       this.reset();
-      this._send([0x90,60,1]);
-      this._send([0x90,60,0]);
+      //-- the original sent this note, I'm not sure why.  I'm turning it off.
+      //this._send([0x90,60,1]);
+      //this._send([0x90,60,0]);
     },
     //------ DW: Code from my MIDI Access Module expands the tiny synth to 
     //------ automatically be able to handle incoming and outgoing MIDI messages
@@ -1809,7 +1907,7 @@ function WebAudioTinySynth(opt){
       return true;
     },
     isMIDIEnabled : function() { return this.MIDIEnabled; },
-    setupMidiDevices : function(callbackSuccess, callbackFailure) {
+    setupMIDIDevices : function(callbackSuccess, callbackFailure) {
       var midi = this;
       if (!navigator.requestMIDIAccess) {   // check if browser supports MIDI!
         if (callbackFailure) callbackFailure(); return;

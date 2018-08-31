@@ -242,8 +242,10 @@ for (thisInstrument in MIDI.Soundfont) {
 	//--- now create the ArrayBuffer with the total instrument file
 	console.log("Building SF_" + thisNum + ":  the instrument " + thisInstrument + "... size of " + totalSize + " bytes...");
 	var AB = new ArrayBuffer(totalSize);
+	console.log("Array buffer is " + ArrayBuffer.byteLength + " bytes long");
 	var Uint32View = new Uint32Array(AB);
 	var ByteView = new Uint8Array(AB);
+	console.log("Byte view is " + ByteView.length + " bytes long");
 	ByteView.fill(0,0,ByteView.length);		// zero the buffer
 	var fileSig = "1BSF"; for (var i = 0; i < fileSig.length; i++) ByteView[i] = fileSig.charCodeAt(i);  // store signature in first 32-bit word
 	var wordPtr = 1;	// where to start writing binary words.
@@ -261,6 +263,6 @@ for (thisInstrument in MIDI.Soundfont) {
 	}
 	//--- now we have the whole binary contents of the file.  So we write it to disk.
 	console.log("Writing to SF_" + thisNum + ":  the instrument " + thisInstrument + "...");
-	fd = fs.writeFileSync("bsoundfonts/SF_" + thisNum + ".BIN", ByteView);
+	fd = fs.writeFileSync("bsoundfonts_new/SF_" + thisNum + ".BIN", ByteView);
 	//--- ^ synchronous would be bad in web serving, but for command line it's faster and easier!
 }
